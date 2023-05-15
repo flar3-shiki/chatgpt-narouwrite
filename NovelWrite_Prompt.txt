@@ -29,7 +29,7 @@ Story setting in below this.
 #Story
 NNNNNN
 
-Charactor setting in below this.
+Character setting in below this.
 #Character
 
 NNNNNN
