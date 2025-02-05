@@ -625,4 +625,50 @@ function update() {
   
   // コースループ（z 座標の折り返し）
   const trackLength = NUM_SEGMENTS * SEGMENT_LENGTH;
-  if(player.pos.z >= trackLength) { player.pos.
+  if(player.pos.z >= trackLength) { player.pos.z -= trackLength; }
+  if(player.pos.z < 0) { player.pos.z += trackLength; }
+  for(let rival of rivals) {
+    if(rival.pos.z >= trackLength) { rival.pos.z -= trackLength; }
+    if(rival.pos.z < 0) { rival.pos.z += trackLength; }
+  }
+  
+  // 現在のセグメントから道路の左右端を算出
+  let currentSegIndex = Math.floor(player.pos.z / SEGMENT_LENGTH);
+  let seg = segments[currentSegIndex];
+  let roadLeft = seg.xOffset - ROAD_WIDTH/2;
+  let roadRight = seg.xOffset + ROAD_WIDTH/2;
+  // 車体幅約60pxの3台分＝180pxの余裕
+  const ALLOWED_MARGIN = 180;
+  let allowedLeft = roadLeft - ALLOWED_MARGIN;
+  let allowedRight = roadRight + ALLOWED_MARGIN;
+  
+  // プレイヤーの x 座標が許容ゾーン外でかつ前進中の場合、オフロードと判定して前進を止める
+  if((player.pos.x < allowedLeft || player.pos.x > allowedRight) && player.speed > 0) {
+    offRoad = true;
+    player.speed = 0;
+  } else {
+    offRoad = false;
+  }
+  
+  // 雲の再配置
+  for(let cloud of clouds) {
+    if(cloud.pos.z < player.pos.z) { cloud.pos.z += 5000; }
+  }
+  
+  renderScene();
+  requestAnimationFrame(update);
+}
+update();
+
+/***************************************
+ * 画面サイズ変更対応
+ ***************************************/
+window.addEventListener("resize", () => {
+  WIDTH = window.innerWidth;
+  HEIGHT = window.innerHeight;
+  canvas.width = WIDTH;
+  canvas.height = HEIGHT;
+});
+</script>
+</body>
+</html>
