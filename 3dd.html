@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>3Dダンジョン＆戦闘システム サンプル（魔法追加・MP回復・階段表示改良版）</title>
+  <style>
+    html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+    canvas { display: block; }
+    /* メインキャンバスは全画面表示 */
+    #gameCanvas {
+      position: absolute;
+      top: 0; left: 0;
+    }
+    /* ミニマップ（右下固定） */
+    #minimap {
+      position: fixed;
+      bottom: 10px;
+      right: 10px;
+      background: rgba(0,0,0,0.7);
+      border: 2px solid #fff;
+      z-index: 4;
+    }
+    /* 画面下部のステータスウィンドウ */
+    #statusWindow {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      width: 100%;
+      height: 80px;
+      background: rgba(0,0,0,0.8);
+      color: #fff;
+      font-family: sans-serif;
+      padding: 10px;
+      box-sizing: border-box;
+      display: flex;
+      align-items: center;
+    }
+    #statusWindow > .statusItem { margin-right: 20px; }
+    /* 中央部分に階段通知用エリア */
+    #statusCenter {
+      flex: 1;
+      text-align: center;
+      font-size: 20px;
+      font-weight: bold;
+    }
+    /* 戦闘ウィンドウ（画面下部に配置） */
+    #battleWindow {
+      position: absolute;
+      left: 50%;
+      bottom: 100px;
+      width: 500px;
+      height: 250px;
+      margin-left: -250px;
+      background: rgba(0,0,0,0.9);
+      color: #fff;
+      border: 3px solid #fff;
+      font-family: sans-serif;
+      padding: 15px;
+      box-sizing: border-box;
+      display: none;
+      z-index: 2;
+    }
+    #battleWindow h2 { margin-top: 0; text-align: center; }
+    #battleCommands {
+      text-align: center;
+      margin-top: 10px;
+    }
+    #battleCommands button {
+      margin: 0 10px;
+      padding: 10px 20px;
+      font-size: 16px;
+    }
+    #battleLog {
+      height: 100px;
+      overflow-y: auto;
+      border: 1px solid #555;
+      padding: 5px;
+      background: #222;
+      margin-top: 10px;
+      font-size: 14px;
+    }
+    /* 赤フラッシュ用オーバーレイ */
+    #redFlash {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(255,0,0,0.5);
+      display: none;
+      z-index: 3;
+    }
+  </style>
+</head>
+<body>
+  <!-- メインキャンバス -->
+  <canvas id="gameCanvas"></canvas>
+  <!-- ミニマップ用キャンバス -->
+  <canvas id="minimap"></canvas>
+  <!-- 赤フラッシュ用オーバーレイ -->
+  <div id="redFlash"></div>
+  <!-- 戦闘ウィンドウ -->
+  <div id="battleWindow">
+    <!-- 敵情報 -->
+    <div id="enemyInfo" style="text-align:center;">
+      <strong id="enemyName">ゴースト</strong> HP: <span id="enemyHP">--</span>
+    </div>
+    <!-- 戦闘コマンド -->
+    <div id="battleCommands">
+      <button id="attackButton" disabled>攻撃</button>
+      <button id="defenseButton" disabled>防御</button>
+      <button id="runButton" disabled>逃げる</button>
+      <button id="magicButton" disabled>魔法</button>
+    </div>
+    <div id="battleLog"></div>
+  </div>
+  <!-- ステータスウィンドウ -->
+  <div id="statusWindow">
+    <div class="statusItem"><strong>名前:</strong> <span id="playerName">勇者</span></div>
+    <div class="statusItem"><strong>HP:</strong> <span id="playerHP">100</span></div>
+    <div class="statusItem"><strong>MP:</strong> <span id="playerMP">30</span></div>
+    <div class="statusItem"><strong>状態:</strong> <span id="playerStatus">通常</span></div>
+    <div class="statusItem" id="floorInfo"></div>
+    <div id="statusCenter"></div>
+  </div>
+  
+  <script>
+    /*==============================
+      定数・キャンバス設定
+    ==============================*/
+    const tileSize = 64;
+    const fov = Math.PI / 3;  // 60°
+    const maxDepth = 1000;
+    const miniScale = 10; // ミニマップ：1タイルあたりのピクセル数
+
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // ミニマップキャンバス設定
+    const minimap = document.getElementById('minimap');
+    const miniCtx = minimap.getContext('2d');
+    minimap.width = 20 * miniScale;
+    minimap.height = 9 * miniScale;
+
+    /*==============================
+      ゲームモード管理
+      "exploration": 探索中
+      "transition": 戦闘移行中
+      "battle": 戦闘中
+    ==============================*/
+    let gameMode = "exploration";
+
+    /*==============================
+      現在のフロア管理
+      0: 地上階／上階, 1: 地下階
+    ==============================*/
+    let currentFloor = 0;
+
+    /*==============================
+      主人公のステータス
+    ==============================*/
+    const player = {
+      name: "勇者",
+      hp: 100,
+      mp: 30,
+      status: "通常",
+      defending: false,
+      x: 96,  // maze0内の通路
+      y: 96,
+      angle: 0,
+      moveSpeed: 150,
+      rotSpeed: 3
+    };
+
+    /*==============================
+      敵のデータ（戦闘開始時に初期化）
+      敵名は「ゴースト」
+    ==============================*/
+    let enemy = null;
+    let enemyFlashing = false;
+    let enemyVisible = true;
+
+    /*==============================
+      ダンジョン（多階層対応）
+      0: 通路, 1: 壁, 2: 下り階段, 3: 上り階段
+    ==============================*/
+    const maze0 = [
+      [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+      [1,0,0,0,0,0,1,0,0,0,0,0,1,0,0,0,0,0,0,1],
+      [1,0,1,1,1,0,1,0,1,1,1,0,1,0,1,1,1,1,0,1],
+      [1,0,1,0,0,0,0,0,0,0,1,0,1,0,0,0,0,2,0,1], // 下り階段：[3][17]=2
+      [1,0,1,0,1,1,1,1,1,0,1,0,1,1,1,1,0,1,0,1],
+      [1,0,0,0,1,0,0,0,1,0,0,0,0,0,0,1,0,0,0,1],
+      [1,1,1,0,1,0,1,0,1,1,1,1,1,1,0,1,0,1,1,1],
+      [1,0,0,0,0,0,1,0,0,0,0,0,0,1,0,0,0,0,0,1],
+      [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+    ];
+    const maze1 = [
+      [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+      [1,0,0,0,0,0,1,0,0,0,0,0,1,0,0,0,0,0,0,1],
+      [1,0,1,1,1,0,1,0,1,1,1,0,1,0,1,1,1,1,0,1],
+      [1,0,1,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,1],
+      [1,0,1,0,1,1,1,1,1,0,1,0,1,1,1,1,0,1,0,1],
+      [1,0,0,0,1,0,0,0,1,0,0,0,0,0,0,1,0,0,0,1],
+      [1,0,0,3,1,0,1,0,1,1,1,1,1,1,0,1,0,1,1,1], // 上り階段：[6][3]=3
+      [1,0,0,0,0,0,1,0,0,0,0,0,0,1,0,0,0,0,0,1],
+      [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+    ];
+    const floors = [maze0, maze1];
+    const mapWidth = maze0[0].length;
+    const mapHeight = maze0.length;
+
+    /*==============================
+      キー入力管理（探索モード用）
+    ==============================*/
+    let keys = {};
+    document.addEventListener('keydown', e => {
+      if (gameMode === "exploration") {
+        keys[e.code] = true;
+        if (e.code === "KeyE") {
+          let mapX = Math.floor(player.x / tileSize);
+          let mapY = Math.floor(player.y / tileSize);
+          let tile = floors[currentFloor][mapY][mapX];
+          if (currentFloor === 0 && tile === 2) {
+            currentFloor = 1;
+            player.x = (3 + 0.5) * tileSize;
+            player.y = (6 + 0.5) * tileSize;
+            appendBattleLog("地下階に降りた！");
+          } else if (currentFloor === 1 && tile === 3) {
+            currentFloor = 0;
+            player.x = (17 + 0.5) * tileSize;
+            player.y = (3 + 0.5) * tileSize;
+            appendBattleLog("地上階に上がった！");
+          }
+        }
+      }
+    });
+    document.addEventListener('keyup', e => {
+      if (gameMode === "exploration") { keys[e.code] = false; }
+    });
+
+    /*==============================
+      エンカウント判定用
+    ==============================*/
+    let moveAccumulator = 0;
+    const encounterInterval = 0.3;
+    const encounterChance = 0.005;
+    // 移動距離累積（MP回復用）
+    let moveDistanceAccumulator = 0;
+
+    /*==============================
+      ミニマップ更新
+    ==============================*/
+    function updateMinimap() {
+      let map = floors[currentFloor];
+      miniCtx.fillStyle = "#ccc";
+      miniCtx.fillRect(0, 0, minimap.width, minimap.height);
+      for (let row = 0; row < mapHeight; row++) {
+        for (let col = 0; col < mapWidth; col++) {
+          let tile = map[row][col];
+          if (tile === 1) {
+            miniCtx.fillStyle = "#555"; // 壁
+          } else if (tile === 2 || tile === 3) {
+            miniCtx.fillStyle = "gray";  // 階段はグレー
+          } else {
+            miniCtx.fillStyle = "#eee"; // 通路
+          }
+          miniCtx.fillRect(col * miniScale, row * miniScale, miniScale, miniScale);
+        }
+      }
+      let playerCol = player.x / tileSize;
+      let playerRow = player.y / tileSize;
+      miniCtx.fillStyle = "yellow";
+      miniCtx.beginPath();
+      miniCtx.arc(playerCol * miniScale, playerRow * miniScale, miniScale / 2, 0, Math.PI * 2);
+      miniCtx.fill();
+    }
+
+    /*==============================
+      戦闘ウィンドウ内の要素
+    ==============================*/
+    const battleWindow = document.getElementById('battleWindow');
+    const attackButton = document.getElementById('attackButton');
+    const defenseButton = document.getElementById('defenseButton');
+    const runButton = document.getElementById('runButton');
+    const magicButton = document.getElementById('magicButton');
+    const battleLog = document.getElementById('battleLog');
+    const enemyHPSpan = document.getElementById('enemyHP');
+    const enemyNameElem = document.getElementById('enemyName');
+    const redFlash = document.getElementById('redFlash');
+    const floorInfo = document.getElementById('floorInfo');
+    const statusCenter = document.getElementById('statusCenter');
+
+    let commandEnabled = false;
+    attackButton.disabled = true;
+    defenseButton.disabled = true;
+    runButton.disabled = true;
+    magicButton.disabled = true;
+    
+    attackButton.addEventListener('click', () => {
+      if (gameMode !== "battle" || !commandEnabled) return;
+      commandEnabled = false;
+      disableBattleButtons();
+      playerTurn("attack");
+    });
+    defenseButton.addEventListener('click', () => {
+      if (gameMode !== "battle" || !commandEnabled) return;
+      commandEnabled = false;
+      disableBattleButtons();
+      playerTurn("defense");
+    });
+    runButton.addEventListener('click', () => {
+      if (gameMode !== "battle" || !commandEnabled) return;
+      commandEnabled = false;
+      disableBattleButtons();
+      playerTurn("run");
+    });
+    magicButton.addEventListener('click', () => {
+      if (gameMode !== "battle" || !commandEnabled) return;
+      commandEnabled = false;
+      disableBattleButtons();
+      let choice = prompt("魔法を選択してください。\n1: ヒーリア（MP3消費、HP30～40回復）\n2: エアリオ（MP5消費、敵に25～40ダメージ）");
+      if (choice === "1") {
+        if (player.mp < 3) {
+          appendBattleLog("MPが足りません！");
+        } else {
+          player.mp -= 3;
+          let heal = Math.floor(Math.random() * 11) + 30;
+          player.hp = Math.min(100, player.hp + heal);
+          appendBattleLog(`ヒーリア！ HPが ${heal} 回復しました！`);
+        }
+      } else if (choice === "2") {
+        if (player.mp < 5) {
+          appendBattleLog("MPが足りません！");
+        } else {
+          player.mp -= 5;
+          let dmg = Math.floor(Math.random() * 16) + 25;
+          enemy.hp -= dmg;
+          appendBattleLog(`エアリオ！ ゴーストに ${dmg} のダメージ！`);
+          enemyHPSpan.textContent = enemy.hp > 0 ? enemy.hp : 0;
+          flashEnemy();
+          if (enemy.hp <= 0) {
+            appendBattleLog("ゴーストを倒した！");
+            setTimeout(() => { endBattle(); }, 1500);
+            return;
+          }
+        }
+      } else {
+        appendBattleLog("魔法の選択がキャンセルされました。");
+      }
+      setTimeout(enemyTurn, 1000);
+    });
+    function disableBattleButtons() {
+      attackButton.disabled = true;
+      defenseButton.disabled = true;
+      runButton.disabled = true;
+      magicButton.disabled = true;
+    }
+    function enableBattleButtons() {
+      attackButton.disabled = false;
+      defenseButton.disabled = false;
+      runButton.disabled = false;
+      magicButton.disabled = false;
+    }
+
+    /*==============================
+      ステータスウィンドウ更新
+      階段タイル上なら中央に "STAIRS" 表示
+    ==============================*/
+    function updateStatusWindow() {
+      document.getElementById('playerName').textContent = player.name;
+      document.getElementById('playerHP').textContent = player.hp;
+      document.getElementById('playerMP').textContent = player.mp;
+      document.getElementById('playerStatus').textContent = player.status;
+      floorInfo.textContent = currentFloor === 0 ? "地上階" : "地下階";
+      let mapX = Math.floor(player.x / tileSize);
+      let mapY = Math.floor(player.y / tileSize);
+      let tile = floors[currentFloor][mapY][mapX];
+      statusCenter.textContent = (tile === 2 || tile === 3) ? "STAIRS" : "";
+    }
+
+    /*==============================
+      探索モード：更新処理
+      ※さらに移動距離累積で、10ピクセルごとにMP回復
+    ==============================*/
+    function updateExploration(deltaTime) {
+      if (keys['KeyA'] || keys['ArrowLeft']) {
+        player.angle -= player.rotSpeed * deltaTime;
+      }
+      if (keys['KeyD'] || keys['ArrowRight']) {
+        player.angle += player.rotSpeed * deltaTime;
+      }
+      player.angle = normalizeAngle(player.angle);
+      let moveStep = player.moveSpeed * deltaTime;
+      let newX = player.x;
+      let newY = player.y;
+      let moved = false;
+      if (keys['KeyW'] || keys['ArrowUp']) {
+        newX += Math.cos(player.angle) * moveStep;
+        newY += Math.sin(player.angle) * moveStep;
+        moved = true;
+      }
+      if (keys['KeyS'] || keys['ArrowDown']) {
+        newX -= Math.cos(player.angle) * moveStep;
+        newY -= Math.sin(player.angle) * moveStep;
+        moved = true;
+      }
+      if (!isWall(newX, player.y)) { player.x = newX; }
+      if (!isWall(player.x, newY)) { player.y = newY; }
+      if (moved) {
+        moveAccumulator += moveStep;
+        moveDistanceAccumulator += moveStep;
+        while (moveDistanceAccumulator >= 10) {
+          player.mp += 1;
+          moveDistanceAccumulator -= 10;
+        }
+        if (moveAccumulator > encounterInterval && Math.random() < encounterChance) {
+          startBattle();
+          moveAccumulator = 0;
+        }
+      } else {
+        moveAccumulator = 0;
+      }
+    }
+
+    /*==============================
+      探索モード：レンダリング（レイキャスト）
+      ※階段タイルはグレーで描画
+    ==============================*/
+    function renderExploration() {
+      ctx.fillStyle = "#333";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      for (let col = 0; col < canvas.width; col++) {
+        let rayAngle = player.angle - fov/2 + (col / canvas.width) * fov;
+        rayAngle = normalizeAngle(rayAngle);
+        const rayDirX = Math.cos(rayAngle);
+        const rayDirY = Math.sin(rayAngle);
+        let distance = 0;
+        let hit = false;
+        let hitTile = 0;
+        const stepSize = 1;
+        while (!hit && distance < maxDepth) {
+          distance += stepSize;
+          let testX = Math.floor((player.x + rayDirX * distance) / tileSize);
+          let testY = Math.floor((player.y + rayDirY * distance) / tileSize);
+          if (testX < 0 || testX >= mapWidth || testY < 0 || testY >= mapHeight) {
+            hit = true;
+            distance = maxDepth;
+          } else {
+            let tile = floors[currentFloor][testY][testX];
+            if (tile === 1 || tile === 2 || tile === 3) {
+              hit = true;
+              hitTile = tile;
+            }
+          }
+        }
+        const correctedDistance = distance * Math.cos(rayAngle - player.angle);
+        const lineHeight = Math.min(canvas.height, (tileSize / correctedDistance) * 277);
+        if (hitTile === 2 || hitTile === 3) {
+          ctx.fillStyle = "gray";
+        } else {
+          let shade = 255 - Math.min(200, correctedDistance / maxDepth * 200);
+          ctx.fillStyle = `rgb(${Math.floor(shade * 0.6)}, ${Math.floor(shade * 0.3)}, 0)`;
+        }
+        ctx.fillRect(col, (canvas.height / 2) - lineHeight / 2, 1, lineHeight);
+      }
+    }
+
+    /*==============================
+      戦闘移行アニメーション（フェードイン＋敵出現）
+    ==============================*/
+    const transitionDuration = 1000;
+    let transitionStart = null;
+    function renderTransition() {
+      if (!transitionStart) transitionStart = performance.now();
+      let elapsed = performance.now() - transitionStart;
+      let alpha = Math.min(1, elapsed / transitionDuration);
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      draw3DEnemyAdvanced(ctx, canvas.width / 2, canvas.height / 2 - 20);
+      ctx.restore();
+      if (elapsed >= transitionDuration) {
+        transitionStart = null;
+        gameMode = "battle";
+        battleWindow.style.display = "block";
+        commandEnabled = false;
+        disableBattleButtons();
+        setTimeout(() => {
+          appendBattleLog("あなたのターン！");
+          commandEnabled = true;
+          enableBattleButtons();
+        }, 1000);
+      }
+    }
+
+    /*==============================
+      戦闘モード：レンダリング
+    ==============================*/
+    function renderBattleScene() {
+      let grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      grad.addColorStop(0, "#222");
+      grad.addColorStop(1, "#000");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      if (!enemyFlashing || enemyVisible) {
+        draw3DEnemyAdvanced(ctx, canvas.width / 2, canvas.height / 2 - 20);
+      }
+    }
+
+    /*==============================
+      3D風美麗敵描画（グラデーション・影付き）
+    ==============================*/
+    function draw3DEnemyAdvanced(ctx, centerX, centerY) {
+      let headGrad = ctx.createRadialGradient(centerX, centerY - 100, 10, centerX, centerY - 100, 30);
+      headGrad.addColorStop(0, "#fddbb0");
+      headGrad.addColorStop(1, "#d1a67a");
+      ctx.fillStyle = headGrad;
+      ctx.beginPath();
+      ctx.ellipse(centerX, centerY - 100, 30, 25, 0, 0, Math.PI * 2);
+      ctx.fill();
+      let bodyGrad = ctx.createLinearGradient(centerX, centerY - 70, centerX, centerY + 20);
+      bodyGrad.addColorStop(0, "#444");
+      bodyGrad.addColorStop(1, "#000");
+      ctx.fillStyle = bodyGrad;
+      ctx.beginPath();
+      ctx.moveTo(centerX - 20, centerY - 70);
+      ctx.lineTo(centerX + 20, centerY - 70);
+      ctx.lineTo(centerX + 35, centerY + 20);
+      ctx.lineTo(centerX - 35, centerY + 20);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "#333";
+      ctx.beginPath();
+      ctx.moveTo(centerX - 20, centerY - 60);
+      ctx.lineTo(centerX - 45, centerY - 45);
+      ctx.lineTo(centerX - 45, centerY - 15);
+      ctx.lineTo(centerX - 20, centerY - 30);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(centerX + 20, centerY - 60);
+      ctx.lineTo(centerX + 45, centerY - 45);
+      ctx.lineTo(centerX + 45, centerY - 15);
+      ctx.lineTo(centerX + 20, centerY - 30);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "#222";
+      ctx.beginPath();
+      ctx.moveTo(centerX - 20, centerY + 20);
+      ctx.lineTo(centerX - 5, centerY + 20);
+      ctx.lineTo(centerX - 10, centerY + 80);
+      ctx.lineTo(centerX - 25, centerY + 80);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(centerX + 20, centerY + 20);
+      ctx.lineTo(centerX + 5, centerY + 20);
+      ctx.lineTo(centerX + 10, centerY + 80);
+      ctx.lineTo(centerX + 25, centerY + 80);
+      ctx.closePath();
+      ctx.fill();
+      ctx.save();
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = "#000";
+      ctx.beginPath();
+      ctx.ellipse(centerX + 5, centerY + 10, 40, 100, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    /*==============================
+      敵グラフィックを3回点滅
+    ==============================*/
+    function flashEnemy() {
+      enemyFlashing = true;
+      let flashes = 0;
+      enemyVisible = false;
+      const flashInterval = setInterval(() => {
+        enemyVisible = !enemyVisible;
+        flashes++;
+        if (flashes >= 6) {
+          clearInterval(flashInterval);
+          enemyFlashing = false;
+          enemyVisible = true;
+        }
+      }, 150);
+    }
+
+    /*==============================
+      敵攻撃時の振動または赤フラッシュ
+    ==============================*/
+    function enemyAttackEffect() {
+      if (navigator.vibrate) {
+        navigator.vibrate([100, 50, 100, 50, 100]);
+      } else {
+        let flashes = 0;
+        redFlash.style.display = "block";
+        const flashInterval = setInterval(() => {
