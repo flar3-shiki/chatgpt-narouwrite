@@ -604,3 +604,175 @@
         let flashes = 0;
         redFlash.style.display = "block";
         const flashInterval = setInterval(() => {
+        	enemyVisible = !enemyVisible;
+　　　flashes++;
+          redFlash.style.display = (flashes % 2 === 0) ? "none" : "block";
+          if (flashes >= 6) {
+            clearInterval(flashInterval);
+            redFlash.style.display = "none";
+          }
+        }, 150);
+      }
+    }
+
+    /*==============================
+      戦闘開始（transitionアニメーションから）
+    ==============================*/
+    function startBattle() {
+      keys = {};  // 入力リセット
+      enemy = { name: "ゴースト", hp: 50, maxHp: 50 };
+      enemyHPSpan.textContent = enemy.hp;
+      enemyNameElem.textContent = enemy.name;
+      battleLog.innerHTML = "";
+      appendBattleLog("ゴーストが現れた！");
+      battleWindow.style.display = "none";
+      gameMode = "transition";
+    }
+
+    /*==============================
+      戦闘終了（探索モードへ復帰）
+    ==============================*/
+    function endBattle() {
+      battleWindow.style.display = "none";
+      gameMode = "exploration";
+    }
+
+    /*==============================
+      プレイヤーターン：行動選択
+      type: "attack" / "defense" / "run" / "magic"
+    ==============================*/
+    function playerTurn(type) {
+      if (type === "attack") {
+        const dmg = Math.floor(Math.random() * 11) + 5;
+        enemy.hp -= dmg;
+        appendBattleLog(`あなたの攻撃！ ゴーストに ${dmg} のダメージ！`);
+        enemyHPSpan.textContent = enemy.hp > 0 ? enemy.hp : 0;
+        flashEnemy();
+        if (enemy.hp <= 0) {
+          appendBattleLog("ゴーストを倒した！");
+          setTimeout(() => { endBattle(); }, 1500);
+          return;
+        }
+      } else if (type === "defense") {
+        player.defending = true;
+        appendBattleLog("あなたは防御態勢に入った！");
+      } else if (type === "run") {
+        if (Math.random() < 0.5) {
+          appendBattleLog("あなたは逃げ切った！");
+          setTimeout(() => { endBattle(); }, 1500);
+          return;
+        } else {
+          appendBattleLog("逃走に失敗した！");
+        }
+      } else if (type === "magic") {
+        let choice = prompt("魔法を選択してください。\n1: ヒーリア（MP3消費、HP30～40回復）\n2: エアリオ（MP5消費、敵に25～40ダメージ）");
+        if (choice === "1") {
+          if (player.mp < 3) {
+            appendBattleLog("MPが足りません！");
+          } else {
+            player.mp -= 3;
+            let heal = Math.floor(Math.random() * 11) + 30;
+            player.hp = Math.min(100, player.hp + heal);
+            appendBattleLog(`ヒーリア！ HPが ${heal} 回復しました！`);
+          }
+        } else if (choice === "2") {
+          if (player.mp < 5) {
+            appendBattleLog("MPが足りません！");
+          } else {
+            player.mp -= 5;
+            let dmg = Math.floor(Math.random() * 16) + 25;
+            enemy.hp -= dmg;
+            appendBattleLog(`エアリオ！ ゴーストに ${dmg} のダメージ！`);
+            enemyHPSpan.textContent = enemy.hp > 0 ? enemy.hp : 0;
+            flashEnemy();
+            if (enemy.hp <= 0) {
+              appendBattleLog("ゴーストを倒した！");
+              setTimeout(() => { endBattle(); }, 1500);
+              return;
+            }
+          }
+        } else {
+          appendBattleLog("魔法の選択がキャンセルされました。");
+        }
+      }
+      setTimeout(enemyTurn, 1000);
+    }
+
+    /*==============================
+      敵ターン：攻撃（防御中なら半減）
+    ==============================*/
+    function enemyTurn() {
+      let dmg = Math.floor(Math.random() * 8) + 3;
+      if (player.defending) {
+        dmg = Math.floor(dmg / 2);
+      }
+      player.hp -= dmg;
+      appendBattleLog(`ゴーストの攻撃！ あなたは ${dmg} のダメージ！`);
+      enemyAttackEffect();
+      if (player.hp <= 0) {
+        player.hp = 0;
+        updateStatusWindow();
+        appendBattleLog("あなたは倒れた...");
+        setTimeout(() => { location.reload(); }, 2000);
+      } else {
+        player.defending = false;
+        setTimeout(() => {
+          appendBattleLog("あなたのターン！");
+          commandEnabled = true;
+          enableBattleButtons();
+        }, 1000);
+      }
+    }
+
+    /*==============================
+      バトルログ更新
+    ==============================*/
+    function appendBattleLog(message) {
+      battleLog.innerHTML += `<div>${message}</div>`;
+      battleLog.scrollTop = battleLog.scrollHeight;
+    }
+
+    /*==============================
+      壁判定（歩行可能は 0,2,3）
+    ==============================*/
+    function isWall(x, y) {
+      let mapX = Math.floor(x / tileSize);
+      let mapY = Math.floor(y / tileSize);
+      if (mapX < 0 || mapX >= mapWidth || mapY < 0 || mapY >= mapHeight) return true;
+      let tile = floors[currentFloor][mapY][mapX];
+      return tile === 1;
+    }
+
+    /*==============================
+      角度正規化
+    ==============================*/
+    function normalizeAngle(angle) {
+      angle %= 2 * Math.PI;
+      if (angle < 0) angle += 2 * Math.PI;
+      return angle;
+    }
+
+    /*==============================
+      メインループ
+    ==============================*/
+    let lastTime = performance.now();
+    function gameLoop() {
+      let now = performance.now();
+      let deltaTime = (now - lastTime) / 1000;
+      lastTime = now;
+      if (gameMode === "exploration") {
+        updateExploration(deltaTime);
+        renderExploration();
+      } else if (gameMode === "transition") {
+        renderTransition();
+      } else if (gameMode === "battle") {
+        renderBattleScene();
+      }
+      updateStatusWindow();
+      updateMinimap();
+      requestAnimationFrame(gameLoop);
+    }
+    requestAnimationFrame(gameLoop);
+  </script>
+</body>
+</html>
